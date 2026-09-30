@@ -9,7 +9,7 @@ jobs:
   secrets:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Scan committed source and history
@@ -21,7 +21,7 @@ jobs:
       matrix:
         python: ['3.12', '3.13']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v6
       - run: uv python install ${{ matrix.python }}
       - run: uv sync --python ${{ matrix.python }} --extra dev --locked
@@ -32,7 +32,7 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build -t qq-mail-mcp:ci .
       - name: Validate Compose and Caddy
         run: |
