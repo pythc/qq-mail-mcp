@@ -1,0 +1,12 @@
+[Unit]
+Description=QQ Mail MCP encrypted SQLite backup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/qq-mail-mcp/current/deploy/backup.py
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/qq-mail-mcp/backups
+ReadOnlyPaths=/opt/qq-mail-mcp/data
+PrivateTmp=true

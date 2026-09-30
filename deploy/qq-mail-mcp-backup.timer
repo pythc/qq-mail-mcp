@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily QQ Mail MCP backup
+
+[Timer]
+OnCalendar=*-*-* 03:40:00 UTC
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

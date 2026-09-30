@@ -1,0 +1,50 @@
+services:
+  mail:
+    build: .
+    restart: unless-stopped
+    environment:
+      QQ_MCP_HOST: 0.0.0.0
+      QQ_MCP_PORT: 8000
+      QQ_MCP_PUBLIC_URL: ${QQ_MCP_PUBLIC_URL:?Set the HTTPS public URL}
+      QQ_MCP_ADMIN_PASSWORD: ${QQ_MCP_ADMIN_PASSWORD:?Generate an admin password}
+      QQ_MCP_ENCRYPTION_KEY: ${QQ_MCP_ENCRYPTION_KEY:?Generate an encryption key}
+      QQ_MCP_ALLOW_SEND: ${QQ_MCP_ALLOW_SEND:-false}
+      QQ_MCP_REQUIRE_SEND_APPROVAL: ${QQ_MCP_REQUIRE_SEND_APPROVAL:-true}
+      QQ_MCP_DATABASE: /app/data/qq-mail.sqlite3
+      QQ_EMAIL: ${QQ_EMAIL:-}
+      QQ_AUTH_CODE: ${QQ_AUTH_CODE:-}
+    volumes:
+      - mail_data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    init: true
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=5).read()"]
+      interval: 30s
+      timeout: 8s
+      start_period: 15s
+      retries: 3
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?Set a public domain}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      mail:
+        condition: service_healthy
+volumes:
+  mail_data:
+  caddy_data:
+  caddy_config:

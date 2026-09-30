@@ -1,0 +1,46 @@
+name: CI
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv python install ${{ matrix.python }}
+      - run: uv sync --python ${{ matrix.python }} --extra dev --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest
+      - run: uv build
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t qq-mail-mcp:ci .
+      - name: Validate Compose and Caddy
+        run: |
+          QQ_MCP_PUBLIC_URL=https://mail.example.com QQ_MCP_ADMIN_PASSWORD=ci-placeholder-not-used-for-auth QQ_MCP_ENCRYPTION_KEY=ci-placeholder-not-used-for-auth DOMAIN=mail.example.com docker compose config --quiet
+          docker run --rm -e DOMAIN=mail.example.com -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2 caddy validate --config /etc/caddy/Caddyfile
+      - name: Container health and authorization smoke test
+        run: |
+          admin_password=$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')
+          encryption_key=$(docker run --rm --entrypoint python qq-mail-mcp:ci -c 'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')
+          echo "::add-mask::$admin_password"
+          echo "::add-mask::$encryption_key"
+          docker run -d --name qq-mail-mcp-ci --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges -p 127.0.0.1:8000:8000 -e QQ_MCP_HOST=0.0.0.0 -e QQ_MCP_PUBLIC_URL=http://localhost:8000 -e QQ_MCP_ADMIN_PASSWORD="$admin_password" -e QQ_MCP_ENCRYPTION_KEY="$encryption_key" -v qq-mail-ci-data:/app/data qq-mail-mcp:ci
+          trap 'docker rm -f qq-mail-mcp-ci; docker volume rm qq-mail-ci-data' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://localhost:8000/healthz; then break; fi
+            sleep 1
+          done
+          curl --fail --silent http://localhost:8000/healthz
+          code=$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'Accept: application/json, text/event-stream' http://localhost:8000/mcp)
+          test "$code" = 401
