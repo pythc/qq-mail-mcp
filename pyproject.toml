@@ -11,7 +11,7 @@ requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 keywords = ["mcp", "qq-mail", "chatgpt", "imap", "smtp", "oauth"]
-dependencies = ["mcp>=1.30,<2", "cryptography>=46,<51", "python-dotenv>=1,<2", "uvicorn>=0.35,<1"]
+dependencies = ["mcp>=1.30,<3", "cryptography>=46,<51", "python-dotenv>=1,<2", "uvicorn>=0.35,<1"]
 
 [project.urls]
 Homepage = "https://github.com/pythc/qq-mail-mcp"
