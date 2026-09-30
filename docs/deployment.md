@@ -34,7 +34,7 @@ docker compose up --build -d
 docker compose ps
 ```
 
-`mail` 仅在容器网络暴露 8000，以 UID 10001 运行，根文件系统只读；`/app/data` 为可写命名卷。Caddy 只在邮件服务健康后启动。浏览器访问自己的 HTTPS 首页绑定邮箱，客户端连接 `/mcp`，选择 OAuth / DCR。
+`mail` 仅在容器网络暴露 8000，以 UID 10001 运行，根文件系统只读；`/app/data` 为可写命名卷。Caddy 只在邮件服务健康后启动。浏览器访问自己的 HTTPS 首页绑定邮箱，客户端连接 `/mcp`，选择 OAuth / CIMD or DCR。
 
 不要将完整 `docker compose config`、`docker inspect` 环境变量输出到共享日志，它们可能展开秘密。
 
@@ -73,7 +73,7 @@ curl -i -H 'Accept: application/json, text/event-stream' https://mail.example.co
 
 表单页面使用 `Referrer-Policy: same-origin`。网关不能改成 `no-referrer`，否则部分浏览器的原生表单可能产生 `Origin: null` 并被来源校验拒绝。应用会为已验证的 OAuth 回调生成 CSP `form-action`；不要在代理中用另一条 CSP 破坏回调。
 
-基础 Caddy 配置含 TLS、安全响应头和 256 KiB 请求限制，**不含限流**。在网关 / 托管平台为 `/register`、`/authorize`、`/token`、`/revoke`、首页 POST、`/consent/*`、`/confirm/*` 增加限流和超时。基础镜像没有第三方 `rate_limit` 指令，不能直接加入未安装的模块。
+基础 Caddy 配置含 TLS、安全响应头和 8 MiB 请求限制。应用内置认证接口限流（每来源每类每分钟 60 次，全局每分钟 600 次），代理后来源可能共用额度。Caddy 本身不含限流。在网关 / 托管平台为 `/register`、`/authorize`、`/token`、`/revoke`、首页 POST、`/consent/*`、`/confirm/*` 增加限流和超时。基础镜像没有第三方 `rate_limit` 指令，不能直接加入未安装的模块。
 
 应用进程应只有一个。SQLite 需要持久化；本项目不面向公共多租户或多实例横向扩展。
 
@@ -115,3 +115,30 @@ docker compose cp mail:/app/data/backups ./backups
 5. 立即停止服务可用 `docker compose stop`；QQ 邮箱中撤销授权码可切断邮箱访问。
 
 同邮箱网页更新授权码保留客户端连接；首次绑定或网页更换邮箱撤销旧客户端授权及草稿。环境绑定的邮箱改变时，用独立数据库重新授权。共享服务器上的网关修改应仅调整此服务的站点配置，保留其他站点。
+
+
+## 预构建镜像与快捷维护
+
+```sh
+# Published releases provide amd64 and arm64 images.
+docker compose -f compose.yaml -f compose.prebuilt.yaml pull
+docker compose -f compose.yaml -f compose.prebuilt.yaml up -d --no-build
+
+# Create a snapshot in the default named volume and export it privately:
+docker compose exec -T mail qq-mail-mcp backup /app/data/snapshot.sqlite3
+mkdir -m 700 -p backups
+docker compose cp mail:/app/data/snapshot.sqlite3 backups/snapshot.sqlite3
+chmod 600 backups/snapshot.sqlite3
+```
+
+快照文件已存在时不会覆盖。每次使用新的文件名。保持密钥单独备份。恢复前必须停止邮件服务，保留最新发送记录以避免重复发送。
+
+```sh
+docker compose stop mail
+docker compose run --rm --no-deps -v "$PWD/backups:/restore:ro" mail qq-mail-mcp restore /restore/snapshot.sqlite3 --confirm-offline
+docker compose up -d --no-build mail
+```
+
+`restore` 验证数据库完整性和原加密密钥，并保存恢复前的快照。不要在服务运行时使用 `--confirm-offline`。升级和回滚均保留原数据库卷与密钥；此版本通过兼容的记录类型扩展存储，没有删除旧版表或字段。
+
+回滚至 0.1.x 前，应先关闭发送并取消待发送草稿：旧版本不会处理新版的附件和回复线程。保留已发送和状态未知的去重记录，不能清空数据库。

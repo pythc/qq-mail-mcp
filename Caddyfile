@@ -7,7 +7,7 @@
 		-Server
 	}
 	request_body {
-		max_size 256KB
+		max_size 8MB
 	}
 	reverse_proxy mail:8000
 }

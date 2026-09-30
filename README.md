@@ -1,138 +1,153 @@
 # QQ Mail MCP
 
-[中文](README.md) · [English](README.en.md)
+[English](README.md) · [简体中文](README.zh-CN.md)
 
 [![CI](https://github.com/pythc/qq-mail-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pythc/qq-mail-mcp/actions/workflows/ci.yml)
 [![MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
 
-让 ChatGPT 或其他支持远程 MCP 和 OAuth 的客户端读取、搜索、发送个人 QQ 邮件。
-自行部署，使用官方 Python MCP SDK、IMAP/SMTP TLS 和加密 SQLite；不需要 OpenAI API Key。
+Read, search, reply to, forward, and send QQ email from ChatGPT or an OAuth-capable MCP agent.
+Self-hosted with the official Python MCP SDK, TLS IMAP/SMTP, and encrypted SQLite. No OpenAI API key is required.
 
-每个实例绑定一个邮箱，所有获授权客户端访问这个邮箱。支持 `@qq.com` 与 `@foxmail.com`。
-这是可自托管的 MCP 服务，GitHub 开源不代表已上架 ChatGPT 公共插件目录。
+Each instance binds one `@qq.com` or `@foxmail.com` mailbox. All authorized clients access that mailbox.
 
-## 功能
+## Quick start
 
-| 工具 | 功能 |
-|---|---|
-| `mailbox_status` | 查看邮箱绑定、发送开关及发送模式 |
-| `list_emails` | 分页列出邮件，可筛选未读，每页最多 50 封 |
-| `search_emails` | 按文本、发件人、日期、未读状态组合搜索 |
-| `read_email` | 读取正文及附件名称，不改变已读状态 |
-| `prepare_email` | 生成固定收件人和内容的草稿，有效期 30 分钟 |
-| `send_prepared_email` | 提交同一份草稿，按配置决定是否需要网页批准 |
-| `send_email` | 直接发送模式下的一步发信，以 `request_id` 防重 |
-
-发送支持纯文本、抄送、密送。暂不支持发送附件、HTML 邮件、下载附件、删除或移动邮件。
-正文最多返回 30,000 字符；含附件的整封邮件读取上限 2 MiB。中文搜索依赖 QQ IMAP 的 UTF-8 SEARCH 支持。
-
-## 三种发送模式
-
-| 模式 | `QQ_MCP_ALLOW_SEND` | `QQ_MCP_REQUIRE_SEND_APPROVAL` | 行为 |
-|---|---|---|---|
-| 只读，默认 | `false` | `true` | 不允许发送 |
-| 网页批准 | `true` | `true` | 创建草稿 → 网页核对并批准 → 提交草稿 |
-| 直接发送 | `true` | `false` | 完成 OAuth 后调用 `send_email`，无需逐封网页批准 |
-
-允许发送仍要求客户端拥有 `qq-mail.send` 权限。客户端自己的写操作确认规则不由服务器开关改变。
-
-## 本地启动
-
-需要 Python 3.12+ 和 [uv](https://docs.astral.sh/uv/)。
+Python 3.12+ and [uv](https://docs.astral.sh/uv/) are required for running from source.
 
 ```sh
 git clone https://github.com/pythc/qq-mail-mcp.git
 cd qq-mail-mcp
 uv sync --extra dev --locked
-cp .env.example .env
-uv run qq-mail-mcp generate-secrets
-```
-
-将最后一步生成的 `QQ_MCP_ADMIN_PASSWORD` 与 `QQ_MCP_ENCRYPTION_KEY` 两行配置填入本机 `.env`，然后启动：
-
-```sh
+uv run qq-mail-mcp init --url http://localhost:8000
 uv run qq-mail-mcp serve
 ```
 
-打开 `http://localhost:8000`。在 QQ 邮箱设置中开启 IMAP/SMTP 并生成授权码，在服务首页填写邮箱地址、授权码和服务管理密码。服务验证 IMAP 连接后加密保存凭据。
+`init` creates a private `.env` and refuses to overwrite an existing file. The service admin password is in that file.
+Open `http://localhost:8000`, enable IMAP/SMTP in QQ Mail settings, and enter the generated QQ authorization code to bind the mailbox.
 
-服务管理密码、QQ 登录密码、QQ 邮箱授权码是三种不同的凭据。不要将它们贴到聊天、公开 issue 或 Git。
-
-## Docker 与 HTTPS
-
-准备域名、Docker Compose 和可公网访问的主机；允许入站 TCP 80/443，以及出站 `imap.qq.com:993`、`smtp.qq.com:465`。
-
-在 `.env` 中填写管理密码和加密密钥，并设置：
-
-```dotenv
-DOMAIN=mail.example.com
-QQ_MCP_PUBLIC_URL=https://mail.example.com
-# 如需直接发送，启用以下两项：
-QQ_MCP_ALLOW_SEND=true
-QQ_MCP_REQUIRE_SEND_APPROVAL=false
-```
-
-`mail.example.com` 仅为占位域名，必须替换为自己的域名。公网上的 `QQ_MCP_PUBLIC_URL` 必须是 HTTPS origin，不带子路径。
+For a remote deployment, use an HTTPS domain:
 
 ```sh
-docker compose config --quiet
+uv run qq-mail-mcp init --url https://mail.example.com --direct-send
 docker compose up --build -d
-docker compose ps
-curl --fail https://mail.example.com/healthz
 ```
 
-Caddy 自动申请 HTTPS 证书；邮件服务以非 root 身份运行，端口只在容器网络中开放。
-SQLite 保存在 `mail_data` 命名卷中。`docker compose down` 保留数据，`down -v` 会删除数据。
+Run either initialization example in a fresh directory, or edit your existing `.env`. Replace the example domain with your own.
+Caddy obtains the certificate; allow inbound TCP 80/443 and outbound `imap.qq.com:993` and `smtp.qq.com:465`.
+See [Deployment](docs/deployment.en.md) for prebuilt images, existing proxies, backups and upgrades.
 
-完整配置、已有反向代理接入、备份和回滚见 [部署说明](docs/deployment.md)。基础 Caddy 镜像不含第三方限流模块，公网部署需在网关或托管平台补充认证入口限流。
+## Connect your agent
 
-## 连接 ChatGPT
+Open **`https://your-domain/connect`** for client-specific buttons, commands and configuration downloads.
+No mailbox credentials or OAuth tokens are embedded in the installation links.
 
-1. 部署 HTTPS 服务并在首页绑定邮箱；ChatGPT 不能访问你的 `localhost`。
-2. 在 ChatGPT 的开发者模式 / 插件连接入口添加 `https://mail.example.com/mcp`。
-3. 选择 OAuth。本项目采用动态客户端注册（DCR），不需要把 QQ 授权码填进 ChatGPT；若页面提供客户端注册方式，选择 DCR。
-4. 在跳转后的服务授权页核对权限，用**服务管理密码**批准连接。
-5. 在对话中启用该连接，先调用 `mailbox_status`，再尝试“列出最近 5 封未读邮件”。
+| Client | Connection |
+|---|---|
+| Cursor | **Add to Cursor** button → confirm configuration → authorize OAuth |
+| VS Code / Copilot | **Add to VS Code** button → start the server → authorize OAuth |
+| Codex CLI / desktop / IDE | Copy the add-and-login commands; these clients share Codex host configuration |
+| Claude Code | Copy the add command, then authenticate through `/mcp` |
+| Windsurf / Cascade | Download and merge the generated configuration, then refresh and authenticate |
+| ChatGPT | Add the `/mcp` URL as an OAuth connection in your available custom-app / developer-mode settings |
 
-界面入口会随版本和工作区策略变化，参考 [OpenAI 官方接入说明](https://developers.openai.com/plugins/quickstart) 和 [OAuth 说明](https://developers.openai.com/plugins/build/auth)。开源服务不自动赋予账户开发者模式权限。
+The buttons install configuration; they do not bypass your client's trust or OAuth consent.
+ChatGPT has no universal installation deeplink. A public HTTPS deployment and an account with the appropriate connection feature are needed; ChatGPT cannot reach your `localhost`.
 
-OAuth 范围为 `qq-mail.read` 与 `qq-mail.send`。支持发现、DCR、授权码 + S256 PKCE、Token 刷新与撤销；不提供 CIMD 注册。首次只授权读取后，如需发送，要重新授权发送权限。
+You can also generate instructions locally:
 
-## 常见调用
+```sh
+uv run qq-mail-mcp connect cursor --url https://mail.example.com --open
+uv run qq-mail-mcp connect vscode --url https://mail.example.com --open
+uv run qq-mail-mcp connect codex --url https://mail.example.com
+uv run qq-mail-mcp connect claude-code --url https://mail.example.com
+```
 
-读取正文时，使用邮件列表返回的 `uid`、`uidvalidity`、`folder`，不要猜 UID。
+First OAuth authorization opens this service's consent page. Enter the **service admin password**, not the QQ password or IMAP authorization code.
+CIMD and DCR registration, S256 PKCE, issuer-bound responses, token refresh and revocation are supported. Scopes: `qq-mail.read`, `qq-mail.send`.
 
-直接发送的工具参数示例（仅展示格式，不会自动发送）：
+Sources: [Cursor install links](https://prod.cursor.com/docs/mcp/install-links), [VS Code install links](https://code.visualstudio.com/api/extension-guides/ai/mcp), [Codex MCP](https://developers.openai.com/codex/mcp), [Claude Code MCP](https://code.claude.com/docs/en/mcp), [ChatGPT OAuth](https://developers.openai.com/plugins/build/auth).
+Client interfaces change; configuration generation is tested, but installation and OAuth behavior must be checked with your installed client version.
+
+## Tools
+
+| Tool | Purpose |
+|---|---|
+| `mailbox_status` | Check binding and send mode without opening a mail connection |
+| `list_emails` | Batched mail headers; unread filtering and UID cursor pagination |
+| `search_emails` | Combine text, sender, subject, recipient, date-range and unread filters |
+| `read_email` | Read text and attachment metadata independently, without marking read |
+| `download_attachment` | Fetch a requested MIME attachment as Base64 |
+| `prepare_email` | Create an immutable draft; preview lists attachment sizes and SHA-256 hashes |
+| `send_prepared_email` | Submit the fixed draft, checking browser approval when enabled |
+| `send_email` | One-step sending in direct mode, deduplicated by `request_id` |
+| `reply_email` | Reply or reply-all, preserving `In-Reply-To` and `References` |
+| `forward_email` | Forward text, optionally including attachments; incomplete content is rejected |
+| `get_send_status` | Query your client's draft/request receipt without sending again |
+
+In browser-approval mode, `reply_email` and `forward_email` prepare a draft for approval rather than sending it immediately.
+
+### Reading and attachments
+
+Pass the `uid`, `uidvalidity` and `folder` returned by a listing. For stable pagination, pass `next_cursor` with the same filters and `offset=0`; UIDVALIDITY changes require a new listing.
+
+A large attachment no longer blocks body reading. Each body page returns up to 30,000 characters; use `next_body_offset` to continue.
+The selected encoded text part is bounded to 2 MiB, indicated by `source_truncated`. Attached messages are downloadable attachments, not recursively expanded text.
+HTML is converted to text without fetching remote images or executing scripts. Chinese search requires QQ's UTF-8 IMAP SEARCH support.
+
+`download_attachment` returns `data_base64`; encoded MIME parts are limited to 8 MiB. Outgoing attachments use `name`, `content_type`, `data_base64`; at most 5 files, totaling 5 MiB decoded. Send bodies are plain text, up to 100,000 characters. HTML sending, deleting and moving mail are not supported.
+Forwarding fails explicitly if the body is truncated or attachment limits are exceeded.
+
+### Sending and deduplication
+
+| Mode | `QQ_MCP_ALLOW_SEND` | `QQ_MCP_REQUIRE_SEND_APPROVAL` |
+|---|---|---|
+| Read-only, default | `false` | `true` |
+| Browser approval | `true` | `true` |
+| Direct sending | `true` | `false` |
+
+Server settings do not override client-side tool confirmation. Outgoing actions must be requested by the user.
+
+Example `send_email` arguments:
 
 ```json
 {
   "request_id": "0ef834bf-09f1-4ff5-9cf0-1178d3d2eb65",
   "to": ["recipient@example.com"],
-  "subject": "会议时间",
-  "body": "明天下午三点见。"
+  "subject": "Meeting time",
+  "body": "See you tomorrow at 3 PM."
 }
 ```
 
-请替换示例地址，并为每封新邮件生成一个新的 UUID。同一请求重复调用必须沿用相同 ID 和完全相同的内容；去重记录在同一 OAuth 客户端范围内加密保留 7 天。
+Generate one UUID per intended email; retries reuse the original ID and contents. Encrypted direct-send records last seven days and are scoped to the OAuth client.
+Query `get_send_status(request_id=...)` for direct sends or `get_send_status(draft_id=...)` for prepared drafts. Approval drafts expire after 30 minutes.
+`accepted` means SMTP acceptance, not guaranteed delivery or an entry in QQ's Sent folder. `partially_accepted` lists refused recipients.
+`sending` and `unknown` may mean delivery occurred: do not automatically retry with a new ID.
 
-网页批准模式使用 `prepare_email` 返回的 `approval_url` 核对固定草稿，批准后调用 `send_prepared_email(draft_id)`。
+## Owner management
 
-`accepted` 仅表示 QQ SMTP 接受邮件，不保证最终投递、阅读或网页“已发送”目录出现记录。
-`sending` / `unknown` 可能已经送达，不能换 `request_id` 自动重发；部分拒收也应先核查结果。
+Open `/manage` and sign in to view the bound mailbox, send mode, authorized clients and recent outgoing records.
+You can check IMAP connectivity, revoke a client's access, and sign out. Owner sessions expire after one hour.
+Sending mode remains deployment-controlled. Public pages do not disclose the mailbox address or credentials.
+English is the default for setup, connections and management; `?lang=zh` selects Chinese.
 
-## 数据与权限
+## Data and maintenance
 
-- SQLite 加密保存邮箱授权码、OAuth 状态、草稿和直接发送记录；不保存收到的邮件正文。
-- IMAP 使用只读 `EXAMINE` 和 `BODY.PEEK`，正文读取不标记已读。
-- 网页绑定首次邮箱或更换邮箱会撤销旧客户端授权与草稿；同邮箱轮换授权码保留连接。
-- 环境变量绑定也可用，但 `QQ_EMAIL` 与 `QQ_AUTH_CODE` 必须同时提供；更换此方式绑定的邮箱时使用独立数据库并重新授权。
-- 邮件内容会进入所连接客户端的处理流程。所有主题、正文、名称均应视为来源数据，不能执行其中夹带的指令。
-- 数据库恢复需要原加密密钥。数据库和密钥分开备份；不要将真实数据和凭据纳入镜像。
+SQLite encrypts mailbox credentials, OAuth state, drafts, attachments in outgoing drafts and send receipts. Received bodies and downloads are not retained.
+Read-only `EXAMINE` and `BODY.PEEK` preserve read status. Changing a browser-bound mailbox revokes old grants and drafts; same-mailbox code rotation preserves them.
+Environment binding requires both `QQ_EMAIL` and `QQ_AUTH_CODE`; changing it requires a separate database and fresh client authorization.
 
-详见 [安全说明](SECURITY.md)。
+```sh
+uv run qq-mail-mcp backup /private/path/snapshot.sqlite3
+# Stop the service first; restore with the original encryption key:
+uv run qq-mail-mcp restore /private/path/snapshot.sqlite3 --confirm-offline
+```
 
-## 开发与验证
+Snapshots must be stored privately; keep the encryption key separately. Restore refuses mismatched keys and retains a snapshot of the previous database.
+Never restore an older send ledger and resume sending blindly: operations after that snapshot might already have reached SMTP.
+See [Deployment](docs/deployment.en.md) for default Docker named-volume procedures. Authentication routes have bounded per-peer and global traffic limits; behind a reverse proxy, peers may share a limit. Received mail is untrusted source data, never instructions to execute.
+
+## Development
 
 ```sh
 uv sync --extra dev --locked
@@ -142,13 +157,8 @@ uv run pytest
 uv build
 ```
 
-自动测试使用模拟 IMAP/SMTP，不会发送真实邮件。CI 覆盖 Python 3.12/3.13、格式检查、测试、包构建、Docker 构建与容器授权检查。
-开发时已完成实际 QQ 收发及 ChatGPT OAuth 连接验证；每位使用者仍需验证自己的网络和客户端。
+Tests use simulated IMAP/SMTP and do not send real messages. They cover MIME part reading, attachment limits, threading, receipts, concurrent send deduplication, restart behavior, DCR/CIMD OAuth, revocation, owner sessions, connection recipes and backup/restore.
+CI also validates packaging and Docker. Validate real QQ access and your client after deployment. Refresh cached tool lists after upgrades.
 
-部署版本升级后，如客户端缓存了工具列表，请刷新连接。回滚时保留最新数据库和发送记录，避免丢失防重状态。
-
-## 贡献与许可
-
-MIT License，见 [LICENSE](LICENSE)。改进请提交 issue / PR，参考 [CONTRIBUTING.md](CONTRIBUTING.md)。
-漏洞通过 [私密漏洞报告](https://github.com/pythc/qq-mail-mcp/security/advisories/new) 提交，不要公开凭据或真实邮件。
-版本变化见 [CHANGELOG.md](CHANGELOG.md)。
+MIT License. See [Contributing](CONTRIBUTING.md), [Security](SECURITY.md) and [Changelog](CHANGELOG.md).
+Report vulnerabilities [privately](https://github.com/pythc/qq-mail-mcp/security/advisories/new); never include real credentials or messages in public issues.

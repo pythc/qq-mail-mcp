@@ -5,7 +5,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from qq_mail_mcp.config import Settings
-from qq_mail_mcp.server import BodyLimit, RevocationFormCompat, build_server
+from qq_mail_mcp.server import AuthGuard, BodyLimit, RevocationFormCompat, build_server
 
 
 @pytest.fixture
@@ -22,7 +22,12 @@ def settings(tmp_path):
 @pytest.fixture
 def server(settings):
     mcp, store, oauth = build_server(settings)
-    return mcp, store, oauth, BodyLimit(RevocationFormCompat(mcp.streamable_http_app()))
+    return (
+        mcp,
+        store,
+        oauth,
+        BodyLimit(AuthGuard(RevocationFormCompat(mcp.streamable_http_app()), settings)),
+    )
 
 
 @pytest.fixture
@@ -33,4 +38,9 @@ def direct_settings(settings):
 @pytest.fixture
 def direct_server(direct_settings):
     mcp, store, oauth = build_server(direct_settings)
-    return mcp, store, oauth, BodyLimit(RevocationFormCompat(mcp.streamable_http_app()))
+    return (
+        mcp,
+        store,
+        oauth,
+        BodyLimit(AuthGuard(RevocationFormCompat(mcp.streamable_http_app()), direct_settings)),
+    )

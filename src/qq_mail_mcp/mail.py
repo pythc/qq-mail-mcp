@@ -1,4 +1,8 @@
+import base64
+import binascii
+import hashlib
 import imaplib
+import quopri
 import re
 import smtplib
 import ssl
@@ -7,7 +11,7 @@ from datetime import date
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
-from email.utils import make_msgid
+from email.utils import getaddresses, make_msgid
 from html.parser import HTMLParser
 
 
@@ -98,6 +102,8 @@ def parse_message(raw: bytes, include_body=False):
         "cc": str(msg.get("Cc", "")),
         "date": str(msg.get("Date", "")),
         "message_id": str(msg.get("Message-ID", "")),
+        "reply_to": str(msg.get("Reply-To", "")),
+        "references": str(msg.get("References", "")),
     }
     if include_body:
         part = msg.get_body(preferencelist=("plain", "html"))
@@ -131,7 +137,7 @@ class Mailbox:
             )
             conn.login(self.email, self.auth_code)
             if "ID" in conn.capabilities:
-                conn.xatom("ID", '("name" "QQ Mail MCP" "version" "0.1.0")')
+                conn.xatom("ID", '("name" "QQ Mail MCP" "version" "0.2.0")')
             status, _ = conn.select(mailbox_name(folder), readonly=True)
             if status != "OK":
                 raise MailError("无法打开指定邮件文件夹")
@@ -159,100 +165,262 @@ class Mailbox:
             return {"email": self.email, "imap_connected": True}
 
     def list(
-        self, folder="INBOX", limit=20, offset=0, unread_only=False, query="", sender="", since=""
+        self,
+        folder="INBOX",
+        limit=20,
+        offset=0,
+        unread_only=False,
+        query="",
+        sender="",
+        since="",
+        subject="",
+        recipient="",
+        before="",
+        before_uid=None,
+        uidvalidity=None,
     ):
         if not 1 <= limit <= 50 or not 0 <= offset <= 10000:
             raise MailError("limit 必须为 1–50，offset 必须为 0–10000")
+        if before_uid is not None and (before_uid < 1 or not uidvalidity or offset):
+            raise MailError("游标分页需要有效 before_uid、uidvalidity，且 offset 为 0")
         criteria = [b"UNSEEN" if unread_only else b"ALL"]
-        if query:
-            criteria.extend([b"TEXT", quote(query)])
-        if sender:
-            criteria.extend([b"FROM", quote(sender)])
-        if since:
-            try:
-                day = date.fromisoformat(since)
-            except ValueError as exc:
-                raise MailError("since 必须为 YYYY-MM-DD") from exc
-            months = (
-                "Jan",
-                "Feb",
-                "Mar",
-                "Apr",
-                "May",
-                "Jun",
-                "Jul",
-                "Aug",
-                "Sep",
-                "Oct",
-                "Nov",
-                "Dec",
-            )
-            criteria.extend([b"SINCE", f"{day.day:02}-{months[day.month - 1]}-{day.year}".encode()])
+        for key, value in (
+            (b"TEXT", query),
+            (b"FROM", sender),
+            (b"SUBJECT", subject),
+            (b"TO", recipient),
+        ):
+            if value:
+                criteria.extend([key, quote(value)])
+        for key, value in ((b"SINCE", since), (b"BEFORE", before)):
+            if value:
+                try:
+                    day = date.fromisoformat(value)
+                except ValueError as exc:
+                    raise MailError("日期必须为 YYYY-MM-DD") from exc
+                months = (
+                    "Jan",
+                    "Feb",
+                    "Mar",
+                    "Apr",
+                    "May",
+                    "Jun",
+                    "Jul",
+                    "Aug",
+                    "Sep",
+                    "Oct",
+                    "Nov",
+                    "Dec",
+                )
+                criteria.extend([key, f"{day.day:02}-{months[day.month - 1]}-{day.year}".encode()])
         with self.connection(folder) as conn:
             validity = self.validity(conn)
+            if uidvalidity is not None and validity != uidvalidity:
+                raise MailError("邮件文件夹标识已变化，请重新查询列表")
+            if before_uid is not None:
+                if before_uid == 1:
+                    return {"messages": [], "total": 0, "has_more": False, "next_cursor": None}
+                criteria.extend([b"UID", f"1:{before_uid - 1}".encode()])
             if any(any(byte > 127 for byte in item) for item in criteria):
                 status, data = conn.uid("SEARCH", "CHARSET", "UTF-8", *criteria)
             else:
                 status, data = conn.uid("SEARCH", None, *criteria)
             if status != "OK":
                 raise MailError("邮件搜索失败，服务器可能不支持该搜索条件")
-            ids = (data[0] or b"").split()[::-1]
+            ids = sorted({int(i) for i in (data[0] or b"").split()}, reverse=True)
             selected = ids[offset : offset + limit]
             messages = []
-            for uid in selected:
+            if selected:
                 status, records = conn.uid(
                     "FETCH",
-                    uid,
+                    ",".join(map(str, selected)),
                     "(UID FLAGS BODY.PEEK[HEADER.FIELDS (SUBJECT FROM TO CC DATE MESSAGE-ID)])",
                 )
                 if status != "OK":
                     raise MailError("读取邮件列表失败")
                 for record in records:
                     if isinstance(record, tuple):
+                        match = re.search(rb"\bUID (\d+)", record[0])
+                        if not match or int(match[1]) not in selected:
+                            continue
                         item = parse_message(record[1])
                         item.update(
-                            uid=int(uid),
+                            uid=int(match[1]),
                             uidvalidity=validity,
                             folder=folder,
                             unread=b"\\Seen" not in record[0],
                         )
                         messages.append(item)
+            messages.sort(key=lambda item: item["uid"], reverse=True)
+            has_more = offset + limit < len(ids)
             return {
                 "messages": messages,
                 "total": len(ids),
                 "offset": offset,
-                "has_more": offset + limit < len(ids),
+                "has_more": has_more,
+                "next_cursor": {
+                    "before_uid": selected[-1],
+                    "uidvalidity": validity,
+                    "folder": folder,
+                }
+                if has_more and selected
+                else None,
                 "content_is_untrusted": True,
             }
 
-    def read(self, uid: int, uidvalidity: int, folder="INBOX"):
+    def _parts(self, conn, uid, uidvalidity):
+        from .mime import parts, structure
+
         if uid < 1 or uidvalidity < 1:
-            raise MailError("uid 和 uidvalidity 必须是正整数，请先查询邮件列表")
+            raise MailError("uid 和 uidvalidity 必须为正整数")
+        if self.validity(conn) != uidvalidity:
+            raise MailError("邮件文件夹标识已变化，请重新查询列表")
+        status, records = conn.uid("FETCH", str(uid), "(BODYSTRUCTURE)")
+        if status != "OK":
+            raise MailError("读取邮件结构失败")
+        raw = b" ".join(
+            b"\r\n".join(record) if isinstance(record, tuple) else record
+            for record in records
+            if record is not None
+        )
+        return parts(structure(raw))
+
+    @staticmethod
+    def _fetch(conn, uid, section, limit):
+        status, records = conn.uid("FETCH", str(uid), f"(BODY.PEEK[{section}]<0.{limit}>)")
+        if status != "OK":
+            raise MailError("读取邮件内容失败")
+        raw = next((r[1] for r in records if isinstance(r, tuple)), None)
+        if raw is None or len(raw) > limit:
+            raise MailError("邮件内容不存在或超过读取限制")
+        return raw
+
+    @staticmethod
+    def _decode(raw, encoding):
+        try:
+            if encoding.upper() == "BASE64":
+                return base64.b64decode(raw)
+            if encoding.upper() == "QUOTED-PRINTABLE":
+                return quopri.decodestring(raw)
+            return raw
+        except (ValueError, binascii.Error) as exc:
+            raise MailError("邮件内容编码不正确") from exc
+
+    def read(self, uid, uidvalidity, folder="INBOX", body_offset=0, body_limit=30000):
+        if not 0 <= body_offset <= 2000000 or not 1 <= body_limit <= 30000:
+            raise MailError("正文 offset 必须为 0–2000000，limit 为 1–30000")
         with self.connection(folder) as conn:
-            if self.validity(conn) != uidvalidity:
-                raise MailError("邮件文件夹标识已变化，请重新查询列表")
-            status, sizes = conn.uid("FETCH", str(uid), "(RFC822.SIZE)")
-            size = next(
+            found = self._parts(conn, uid, uidvalidity)
+            result = parse_message(self._fetch(conn, uid, "HEADER", 65536))
+            candidates = [
+                p
+                for p in found
+                if not p["attachment"] and p["content_type"] in ("text/plain", "text/html")
+            ]
+            chosen = next(
+                (p for p in candidates if p["content_type"] == "text/plain"),
+                candidates[0] if candidates else None,
+            )
+            body, source_truncated = "", False
+            if chosen:
+                limit = 2 * 1024 * 1024
+                raw = self._fetch(conn, uid, chosen["part_id"], limit)
+                source_truncated = chosen["encoded_size"] > limit
+                if source_truncated and chosen["encoding"].upper() == "BASE64":
+                    raw = re.sub(rb"\s+", b"", raw)
+                    raw = raw[: len(raw) - len(raw) % 4]
+                raw = self._decode(raw, chosen["encoding"])
+                try:
+                    body = raw.decode(chosen["charset"], "replace")
+                except LookupError:
+                    body = raw.decode("utf-8", "replace")
+                if chosen["content_type"] == "text/html":
+                    parser = PlainHTML()
+                    parser.feed(body)
+                    body = "".join(parser.parts)
+            end = body_offset + body_limit
+            result.update(
+                uid=uid,
+                uidvalidity=uidvalidity,
+                folder=folder,
+                body=body[body_offset:end],
+                body_truncated=end < len(body) or source_truncated,
+                source_truncated=source_truncated,
+                next_body_offset=end if end < len(body) else None,
+                attachments=[
+                    {k: p[k] for k in ("part_id", "name", "content_type", "encoded_size")}
+                    for p in found
+                    if p["attachment"] or p["content_type"] not in ("text/plain", "text/html")
+                ],
+                content_is_untrusted=True,
+            )
+            return result
+
+    def attachment(self, uid, uidvalidity, part_id, folder="INBOX"):
+        if not re.fullmatch(r"[1-9][0-9]*(?:\.[1-9][0-9]*)*", part_id):
+            raise MailError("part_id 必须来自 read_email 的附件列表")
+        with self.connection(folder) as conn:
+            found = self._parts(conn, uid, uidvalidity)
+            part = next(
                 (
-                    re.search(rb"RFC822.SIZE (\d+)", x)
-                    for x in sizes
-                    if isinstance(x, bytes) and b"RFC822.SIZE" in x
+                    p
+                    for p in found
+                    if p["part_id"] == part_id
+                    and (p["attachment"] or p["content_type"] not in ("text/plain", "text/html"))
                 ),
                 None,
             )
-            if status != "OK" or size is None:
-                raise MailError("邮件不存在或已被移除")
-            if int(size.group(1)) > 2 * 1024 * 1024:
-                raise MailError("邮件超过 2 MiB（含附件），请到 QQ 邮箱查看")
-            status, records = conn.uid("FETCH", str(uid), "(BODY.PEEK[])")
-            if status != "OK":
-                raise MailError("读取邮件失败")
-            raw = next((x[1] for x in records if isinstance(x, tuple)), None)
-            if raw is None:
-                raise MailError("邮件不存在或已被移除")
-            result = parse_message(raw, include_body=True)
-            result.update(uid=uid, uidvalidity=uidvalidity, folder=folder)
-            return result
+            if not part:
+                raise MailError("附件不存在")
+            if part["encoded_size"] > 8 * 1024 * 1024:
+                raise MailError("附件编码后超过 8 MiB，请在 QQ 邮箱下载")
+            raw = self._fetch(conn, uid, part_id, 8 * 1024 * 1024)
+            if len(raw) != part["encoded_size"]:
+                raise MailError("附件读取不完整")
+            data = self._decode(raw, part["encoding"])
+            return {
+                "name": part["name"] or "attachment",
+                "content_type": part["content_type"],
+                "size": len(data),
+                "data_base64": base64.b64encode(data).decode(),
+                "content_is_untrusted": True,
+            }
+
+    def reply(self, uid, uidvalidity, body, folder="INBOX", reply_all=False):
+        with self.connection(folder) as conn:
+            self._parts(conn, uid, uidvalidity)
+            raw = self._fetch(conn, uid, "HEADER", 65536)
+        msg = BytesParser(policy=policy.default).parsebytes(raw)
+        to = [addr for _, addr in getaddresses([str(msg.get("Reply-To") or msg.get("From", ""))])]
+        cc = (
+            [addr for _, addr in getaddresses([str(msg.get("To", "")), str(msg.get("Cc", ""))])]
+            if reply_all
+            else []
+        )
+        to = list(dict.fromkeys(a for a in to if a.casefold() != self.email.casefold()))
+        cc = list(
+            dict.fromkeys(
+                a
+                for a in cc
+                if a.casefold() != self.email.casefold()
+                and a.casefold() not in {x.casefold() for x in to}
+            )
+        )
+        if not to and cc:
+            to, cc = [cc[0]], cc[1:]
+        subject = str(msg.get("Subject", ""))
+        draft = prepare_message(
+            self.email,
+            to,
+            subject if subject.lower().startswith("re:") else "Re: " + subject,
+            body,
+            cc,
+        )
+        ids = re.findall(r"<[^<>\s]+>", str(msg.get("Message-ID", "")))
+        references = re.findall(r"<[^<>\s]+>", str(msg.get("References", "")))
+        if ids:
+            draft.update(in_reply_to=ids[0], references=" ".join((references + [ids[0]])[-20:]))
+        return draft
 
     def send(self, draft):
         msg = EmailMessage()
@@ -263,7 +431,18 @@ class Mailbox:
         msg["Subject"] = draft["subject"]
         msg["Message-ID"] = draft["message_id"]
         msg["Date"] = draft["date"]
+        for header, key in (("In-Reply-To", "in_reply_to"), ("References", "references")):
+            if draft.get(key):
+                msg[header] = draft[key]
         msg.set_content(draft["body"])
+        for attachment in draft.get("attachments", []):
+            main, sub = attachment["content_type"].split("/", 1)
+            msg.add_attachment(
+                base64.b64decode(attachment["data_base64"]),
+                maintype=main,
+                subtype=sub,
+                filename=attachment["name"],
+            )
         recipients = list(dict.fromkeys(draft["to"] + draft["cc"] + draft["bcc"]))
         with smtplib.SMTP_SSL(
             "smtp.qq.com", 465, timeout=20, context=ssl.create_default_context()
@@ -299,3 +478,42 @@ def prepare_message(email, to, subject, body, cc=None, bcc=None):
         "message_id": make_msgid(domain="qq.com"),
         "date": formatdate(),
     }
+
+
+def attach_files(payload, attachments=None):
+    files, total = [], 0
+    for item in attachments or []:
+        name = item.get("name", "")
+        kind = item.get("content_type", "application/octet-stream")
+        if not name or len(name) > 200 or any(c in name for c in "/\\\r\n\x00"):
+            raise MailError("附件名称不正确")
+        if not re.fullmatch(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+", kind):
+            raise MailError("附件类型不正确")
+        try:
+            data = base64.b64decode(item.get("data_base64", ""), validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise MailError("附件必须为有效 Base64") from exc
+        total += len(data)
+        if total > 5 * 1024 * 1024 or len(files) >= 5:
+            raise MailError("最多 5 个附件，合计不超过 5 MiB")
+        files.append(
+            {"name": name, "content_type": kind, "data_base64": base64.b64encode(data).decode()}
+        )
+    if files:
+        payload["attachments"] = files
+    return payload
+
+
+def draft_preview(payload):
+    preview = {k: v for k, v in payload.items() if k != "attachments"}
+    if payload.get("attachments"):
+        preview["attachments"] = [
+            {
+                "name": item["name"],
+                "content_type": item["content_type"],
+                "size": len(base64.b64decode(item["data_base64"])),
+                "sha256": hashlib.sha256(base64.b64decode(item["data_base64"])).hexdigest(),
+            }
+            for item in payload["attachments"]
+        ]
+    return preview

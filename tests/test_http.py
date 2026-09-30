@@ -124,6 +124,10 @@ def test_oauth_pkce_refresh_and_authenticated_discovery(server, settings):
             "read_email",
             "prepare_email",
             "send_prepared_email",
+            "download_attachment",
+            "get_send_status",
+            "reply_email",
+            "forward_email",
         }
         status = call(client, tokens["access_token"], "mailbox_status")
         assert status["structuredContent"]["configured"] is False

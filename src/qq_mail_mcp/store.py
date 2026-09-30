@@ -89,7 +89,7 @@ class Store:
             if changed:
                 db.execute(
                     "DELETE FROM records WHERE kind IN "
-                    "('access','refresh','code','consent','send_request')"
+                    "('access','refresh','code','consent','send_request','send_receipt','grant')"
                 )
                 db.execute("DELETE FROM drafts")
             db.execute(
@@ -169,7 +169,11 @@ class Store:
             ).fetchone()
             if not row or (client is not None and row["client"] != client):
                 return None
-            return {"payload": self.unpack(row["payload"]), "state": row["state"]}
+            return {
+                "payload": self.unpack(row["payload"]),
+                "state": row["state"],
+                "expires": row["expires"],
+            }
 
     def transition(self, draft_id, before, after, client=None):
         with self.connect() as db:
@@ -179,3 +183,85 @@ class Store:
                 (after, digest(draft_id), before, time.time(), client, client),
             )
             return result.rowcount == 1
+
+    def send_status(self, client, draft_id=None, request_id=None):
+        if request_id:
+            key = digest(json.dumps([client, request_id]))
+            with self.connect() as db:
+                row = db.execute(
+                    "SELECT payload FROM records WHERE kind='send_request' AND key=? AND expires>?",
+                    (key, time.time()),
+                ).fetchone()
+            draft_id = self.unpack(row["payload"])["draft_id"] if row else None
+        draft = self.draft(draft_id, client) if draft_id else None
+        if not draft:
+            return None
+        receipt = self.get("send_receipt", draft_id)
+        return {
+            "draft_id": draft_id,
+            "status": receipt["status"] if receipt else draft["state"],
+            "message_id": draft["payload"]["message_id"],
+            "expires_at": draft["expires"],
+            "receipt": receipt,
+            "delivery_confirmed": False,
+        }
+
+    def finish_send(self, draft_id, client, status, receipt):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            updated = db.execute(
+                "UPDATE drafts SET state=? WHERE id=? AND client=? AND state='sending'",
+                (
+                    "sent" if status in ("accepted", "partially_accepted") else "unknown",
+                    digest(draft_id),
+                    client,
+                ),
+            )
+            if updated.rowcount:
+                db.execute(
+                    "INSERT OR REPLACE INTO records VALUES ('send_receipt', ?, ?, ?)",
+                    (
+                        digest(draft_id),
+                        self.pack({"status": status, **receipt}),
+                        time.time() + 7 * 86400,
+                    ),
+                )
+
+    def items(self, kind):
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT payload FROM records WHERE kind=? AND expires>?", (kind, time.time())
+            ).fetchall()
+        return [self.unpack(row["payload"]) for row in rows]
+
+    def revoke_client(self, client_id):
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT kind, key, payload FROM records "
+                "WHERE kind IN ('access','refresh','code','consent','grant')"
+            ).fetchall()
+            for row in rows:
+                if self.unpack(row["payload"]).get("client_id") == client_id:
+                    db.execute(
+                        "DELETE FROM records WHERE kind=? AND key=?", (row["kind"], row["key"])
+                    )
+            # Cancel pending outbound operations, keeping uncertain/sent records for deduplication.
+            db.execute(
+                "UPDATE drafts SET state='revoked' WHERE client=? "
+                "AND state IN ('pending','approved')",
+                (client_id,),
+            )
+
+    def grants(self):
+        grants = {item["client_id"]: item for item in self.items("grant")}
+        for value in self.items("refresh") + self.items("access"):
+            client_id = value.get("client_id")
+            if client_id and client_id not in grants:
+                metadata = self.get("client", client_id) or self.get("cimd", client_id) or {}
+                grants[client_id] = {
+                    "client_id": client_id,
+                    "client_name": metadata.get("client_name", client_id),
+                    "scopes": value.get("scopes", []),
+                }
+        return list(grants.values())

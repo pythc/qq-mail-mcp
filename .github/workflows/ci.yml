@@ -6,6 +6,15 @@ on:
 permissions:
   contents: read
 jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan committed source and history
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.30.1 git /repo --redact --no-banner
   test:
     runs-on: ubuntu-latest
     strategy:
@@ -44,3 +53,4 @@ jobs:
           curl --fail --silent http://localhost:8000/healthz
           code=$(curl --silent --output /dev/null --write-out '%{http_code}' -H 'Accept: application/json, text/event-stream' http://localhost:8000/mcp)
           test "$code" = 401
+          QQ_MCP_ADMIN_PASSWORD="$admin_password" python3 scripts/oauth_smoke.py

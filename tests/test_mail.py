@@ -82,8 +82,12 @@ class FakeIMAP:
         self.commands.append(args)
         if args[0] == "SEARCH":
             return "OK", [b"1 2"]
-        if args[-1] == "(RFC822.SIZE)":
-            return "OK", [f"1 (RFC822.SIZE {self.size})".encode()]
+        if args[-1] == "(BODYSTRUCTURE)":
+            return "OK", [
+                b'1 (BODYSTRUCTURE ("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 4 1))'
+            ]
+        if "BODY.PEEK[1]" in args[-1]:
+            return "OK", [(b"1 (BODY[1]", b"body"), b")"]
         return "OK", [(b"1 (UID 2 FLAGS ()", b"Subject: hello\r\n\r\nbody"), b")"]
 
     def logout(self):
@@ -100,20 +104,19 @@ def test_imap_list_search_and_read_are_readonly(monkeypatch):
     assert value["has_more"]
     assert mailbox.read(2, 123)["body"] == "body"
     fetches = [cmd for cmd in conn.commands if cmd[0] == "FETCH"]
-    assert all("PEEK" in cmd[-1] or "SIZE" in cmd[-1] for cmd in fetches)
+    assert all("PEEK" in cmd[-1] or "BODYSTRUCTURE" in cmd[-1] for cmd in fetches)
     mailbox.list(query="会议")
     assert ("SEARCH", "CHARSET", "UTF-8", b"ALL", b"TEXT", '"会议"'.encode()) in conn.commands
 
 
-def test_stale_uid_and_oversized_mail_are_rejected(monkeypatch):
+def test_stale_uid_is_rejected_and_total_size_does_not_block_body(monkeypatch):
     conn = FakeIMAP()
     monkeypatch.setattr("imaplib.IMAP4_SSL", lambda *a, **kw: conn)
     mailbox = Mailbox("test@qq.com", "dummy")
     with pytest.raises(MailError, match="标识已变化"):
         mailbox.read(1, 999)
     conn.size = 3 * 1024 * 1024
-    with pytest.raises(MailError, match="超过 2 MiB"):
-        mailbox.read(1, 123)
+    assert mailbox.read(1, 123)["body"] == "body"
 
 
 def test_smtp_keeps_bcc_only_in_envelope_and_uses_qq_sender(monkeypatch):

@@ -1,0 +1,4 @@
+# Overlay: docker compose -f compose.yaml -f compose.prebuilt.yaml up -d --no-build
+services:
+  mail:
+    image: ghcr.io/pythc/qq-mail-mcp:${QQ_MCP_VERSION:-0.2.0}

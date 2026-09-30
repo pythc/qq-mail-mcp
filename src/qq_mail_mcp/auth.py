@@ -1,3 +1,4 @@
+import asyncio
 import secrets
 import time
 from urllib.parse import urlencode, urlsplit
@@ -12,6 +13,8 @@ from mcp.server.auth.provider import (
     TokenError,
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+
+from .cimd import MetadataClient, fetch_metadata
 
 READ = "qq-mail.read"
 SEND = "qq-mail.send"
@@ -31,10 +34,26 @@ class PersonalOAuth:
         self.scopes = [READ, SEND] if settings.allow_send else [READ]
 
     async def get_client(self, client_id):
+        if client_id.startswith("https://"):
+            value = self.store.get("cimd", client_id)
+            if not value:
+                try:
+                    value, ttl = await asyncio.to_thread(fetch_metadata, client_id)
+                    client = MetadataClient.model_validate(value)
+                    self.validate_redirects(client)
+                    client.scope = " ".join(self.scopes)
+                    value = client.model_dump(mode="json")
+                    if ttl:
+                        self.store.put("cimd", client_id, value, ttl=ttl)
+                except Exception:
+                    # Do not log remote metadata, callback URLs or fetch exceptions.
+                    return None
+            return MetadataClient.model_validate(value)
         value = self.store.get("client", client_id)
         return OAuthClientInformationFull.model_validate(value) if value else None
 
-    async def register_client(self, client_info):
+    @staticmethod
+    def validate_redirects(client_info):
         for uri in client_info.redirect_uris:
             url = urlsplit(str(uri))
             if (
@@ -49,6 +68,9 @@ class PersonalOAuth:
                 )
             ):
                 raise RegistrationError("invalid_redirect_uri", "HTTPS redirects required")
+
+    async def register_client(self, client_info):
+        self.validate_redirects(client_info)
         self.store.put(
             "client", client_info.client_id, client_info.model_dump(mode="json"), ttl=365 * 86400
         )
@@ -65,6 +87,7 @@ class PersonalOAuth:
             ticket,
             {
                 "client_id": client.client_id,
+                "client_name": client.client_name or client.client_id,
                 "params": params.model_dump(mode="json"),
                 "scopes": scopes,
             },
@@ -94,6 +117,18 @@ class PersonalOAuth:
         if params.state is not None:
             query["state"] = params.state
         uri = str(params.redirect_uri)
+        query["iss"] = self.settings.public_url
+        self.store.put(
+            "grant",
+            pending["client_id"],
+            {
+                "client_id": pending["client_id"],
+                "client_name": pending.get("client_name", pending["client_id"]),
+                "scopes": pending["scopes"],
+                "authorized_at": time.time(),
+            },
+            ttl=365 * 86400,
+        )
         return uri + ("&" if "?" in uri else "?") + urlencode(query)
 
     async def load_authorization_code(self, client, authorization_code):
